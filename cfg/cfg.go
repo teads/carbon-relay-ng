@@ -48,6 +48,9 @@ type Route struct {
 	Regex        string
 	Destinations []string
 
+	// consistentHashing
+	ReplicationFactor int
+
 	// grafanaNet & kafkaMdm & Google PubSub
 	SchemasFile  string
 	OrgId        int

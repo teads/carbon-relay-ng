@@ -85,6 +85,7 @@ commands:
                prefix=<str>                      only take in metrics that have this prefix
                sub=<str>                         only take in metrics that match this substring
                regex=<regex>                     only take in metrics that match this regex (expensive!)
+               replicationFactor=<int>           only for consistentHashing, is the number of destinations for a point, defaults to 1
              <dest>: <addr> <opts>
                <addr>                            a tcp endpoint. i.e. ip:port or hostname:port
                                                  for consistentHashing routes, an instance identifier can also be present:

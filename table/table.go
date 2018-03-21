@@ -3,6 +3,7 @@ package table
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -375,6 +376,7 @@ func (table *Table) Print() (str string) {
 	maxRWNew := 3
 	maxRWNot := 3
 	maxRWMax := 3
+	maxRReplicationFactor := 3
 
 	t := table.Snapshot()
 	for _, rw := range t.Rewriters {
@@ -397,13 +399,17 @@ func (table *Table) Print() (str string) {
 		maxAInterval = max(maxAInterval, len(fmt.Sprintf("%d", agg.Interval)))
 		maxAwait = max(maxAwait, len(fmt.Sprintf("%d", agg.Wait)))
 	}
-	for _, route := range t.Routes {
-		maxRType = max(maxRType, len(route.Type))
-		maxRKey = max(maxRKey, len(route.Key))
-		maxRPrefix = max(maxRPrefix, len(route.Matcher.Prefix))
-		maxRSub = max(maxRSub, len(route.Matcher.Sub))
-		maxRRegex = max(maxRRegex, len(route.Matcher.Regex))
-		for _, dest := range route.Dests {
+	for _, r := range t.Routes {
+		maxRType = max(maxRType, len(r.Type))
+		maxRKey = max(maxRKey, len(r.Key))
+		maxRPrefix = max(maxRPrefix, len(r.Matcher.Prefix))
+		maxRSub = max(maxRSub, len(r.Matcher.Sub))
+		maxRRegex = max(maxRRegex, len(r.Matcher.Regex))
+		if r.Type == "consistentHashing" {
+			maxRReplicationFactor = max(maxRReplicationFactor, r.Config.(route.ConsistentHashingConfig).ReplicationFactor)
+		}
+
+		for _, dest := range r.Dests {
 			maxDPrefix = max(maxDPrefix, len(dest.Matcher.Prefix))
 			maxDSub = max(maxDSub, len(dest.Matcher.Sub))
 			maxDRegex = max(maxDRegex, len(dest.Matcher.Regex))
@@ -417,8 +423,8 @@ func (table *Table) Print() (str string) {
 	rowFmtB := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds\n", maxBPrefix, maxBSub, maxBRegex)
 	heaFmtA := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5s  %%-%ds  %%-%ds %%-7s\n", maxAFunc, maxARegex, maxAPrefix, maxASub, maxAOutFmt, maxAInterval, maxAwait)
 	rowFmtA := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5t  %%-%dd  %%-%dd %%-7t\n", maxAFunc, maxARegex, maxAPrefix, maxASub, maxAOutFmt, maxAInterval, maxAwait)
-	heaFmtR := fmt.Sprintf("  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds\n", maxRType, maxRKey, maxRPrefix, maxRSub, maxRRegex)
-	rowFmtR := fmt.Sprintf("> %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds\n", maxRType, maxRKey, maxRPrefix, maxRSub, maxRRegex)
+	heaFmtR := fmt.Sprintf("  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds\n", maxRType, maxRKey, maxRPrefix, maxRSub, maxRRegex, maxRReplicationFactor)
+	rowFmtR := fmt.Sprintf("> %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds\n", maxRType, maxRKey, maxRPrefix, maxRSub, maxRRegex, maxRReplicationFactor)
 	heaFmtD := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5s  %%-6s  %%-6s\n", maxDPrefix, maxDSub, maxDRegex, maxDAddr, maxDSpoolDir)
 	rowFmtD := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5t  %%-6t  %%-6t\n", maxDPrefix, maxDSub, maxDRegex, maxDAddr, maxDSpoolDir)
 
@@ -448,25 +454,30 @@ func (table *Table) Print() (str string) {
 	}
 
 	str += "\n## Routes:\n"
-	cols = fmt.Sprintf(heaFmtR, "type", "key", "prefix", "substr", "regex")
+	cols = fmt.Sprintf(heaFmtR, "type", "key", "prefix", "substr", "regex", "replicationFactor")
 	rcols := fmt.Sprintf(heaFmtD, "prefix", "substr", "regex", "addr", "spoolDir", "spool", "pickle", "online")
 	indent := "  "
 	str += cols + underscore(max(len(cols), len(rcols)+len(indent))-1)
 	divider := indent + strings.Repeat("-", max(len(cols)-len(indent), len(rcols))-1) + "\n"
 
-	for _, route := range t.Routes {
-		m := route.Matcher
-		str += fmt.Sprintf(rowFmtR, route.Type, route.Key, m.Prefix, m.Sub, m.Regex)
-		if route.Type == "GrafanaNet" {
-			str += indent + route.Addr + "\n"
+	for _, r := range t.Routes {
+		m := r.Matcher
+		var replicationFactor = "-"
+		if r.Type == "consistentHashing" {
+			config := r.Config.(route.ConsistentHashingConfig)
+			replicationFactor = strconv.Itoa(config.ReplicationFactor)
+		}
+		str += fmt.Sprintf(rowFmtR, r.Type, r.Key, m.Prefix, m.Sub, m.Regex, replicationFactor)
+		if r.Type == "GrafanaNet" {
+			str += indent + r.Addr + "\n"
 			continue
 		}
 
-		if len(route.Dests) < 1 {
+		if len(r.Dests) < 1 {
 			continue
 		}
 		str += indent + rcols + divider
-		for _, dest := range route.Dests {
+		for _, dest := range r.Dests {
 			m := dest.Matcher
 			str += indent + fmt.Sprintf(rowFmtD, m.Prefix, m.Sub, m.Regex, dest.Addr, dest.SpoolDir, dest.Spool, dest.Pickle, dest.Online)
 		}
@@ -617,16 +628,26 @@ func (table *Table) InitRoutes(config cfg.Config) error {
 			}
 			table.AddRoute(route)
 		case "consistentHashing":
+			var replicationFactor = 1
+			if routeConfig.ReplicationFactor != 0 {
+				replicationFactor = routeConfig.ReplicationFactor
+			}
+
 			destinations, err := imperatives.ParseDestinations(routeConfig.Destinations, table, false, routeConfig.Key)
 			if err != nil {
 				log.Error(err.Error())
 				return fmt.Errorf("could not parse destinations for route '%s'", routeConfig.Key)
 			}
-			if len(destinations) < 2 {
-				return fmt.Errorf("must get at least 2 destination for route '%s'", routeConfig.Key)
+
+			if replicationFactor <= 0 {
+				return fmt.Errorf("replicationFactor must be at least 1 '%s'", routeConfig.Key)
 			}
 
-			route, err := route.NewConsistentHashing(routeConfig.Key, routeConfig.Prefix, routeConfig.Substr, routeConfig.Regex, destinations)
+			if replicationFactor > len(destinations) {
+				return fmt.Errorf("replicationFactor MUST be at most the number of destinations '%s'", routeConfig.Key)
+			}
+
+			route, err := route.NewConsistentHashing(routeConfig.Key, routeConfig.Prefix, routeConfig.Substr, routeConfig.Regex, replicationFactor, destinations)
 			if err != nil {
 				log.Error(err.Error())
 				return fmt.Errorf("error adding route '%s'", routeConfig.Key)
