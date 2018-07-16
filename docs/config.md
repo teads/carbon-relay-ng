@@ -112,6 +112,7 @@ destinations = [
 
 [[route]]
 # a carbon route that sends to multiple carbon-cache servers
+# it also buffers points in memory if backends are not available
 key = 'carbon-default'
 type = 'consistentHashing'
 prefix = 'consistentHashing'
@@ -119,9 +120,9 @@ prefix = 'consistentHashing'
 # regex = ''
  replicationFactor = 2
  destinations = [
-  'carbon-cache1:2003 spool=true pickle=false',
-  'carbon-cache2:2003 spool=true pickle=false',
-  'carbon-cache3:2003 spool=true pickle=false'
+  'carbon-cache1:2003 spool=true pickle=false memoryspoolsize=1000000',
+  'carbon-cache2:2003 spool=true pickle=false memoryspoolsize=1000000',
+  'carbon-cache3:2003 spool=true pickle=false memoryspoolsize=1000000'
 ]
 ```
 
@@ -145,6 +146,7 @@ spoolsyncevery       |     N     |  int          | 10k     | sync spool to disk 
 spoolsyncperiod      |     N     |  int  (ms)    | 1000    | sync spool to disk every this many milliseconds
 spoolsleep           |     N     |  int (micros) | 500     | sleep this many microseconds(!) in between ingests from bulkdata/redo buffers into spool
 unspoolsleep         |     N     |  int (micros) | 10      | sleep this many microseconds(!) in between reads from the spool, when replaying spooled data
+memoryspoolsize      |     N     |  int          | 0       | enables memory spool and defines the number of points to buffer before dropping
 
 ## grafanaNet route
 

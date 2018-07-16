@@ -371,6 +371,7 @@ func (table *Table) Print() (str string) {
 	maxDRegex := 5
 	maxDAddr := 16
 	maxDSpoolDir := 16
+	maxDMemorySpoolSize := 16
 
 	maxRWOld := 3
 	maxRWNew := 3
@@ -425,8 +426,8 @@ func (table *Table) Print() (str string) {
 	rowFmtA := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5t  %%-%dd  %%-%dd %%-7t\n", maxAFunc, maxARegex, maxAPrefix, maxASub, maxAOutFmt, maxAInterval, maxAwait)
 	heaFmtR := fmt.Sprintf("  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds\n", maxRType, maxRKey, maxRPrefix, maxRSub, maxRRegex, maxRReplicationFactor)
 	rowFmtR := fmt.Sprintf("> %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds\n", maxRType, maxRKey, maxRPrefix, maxRSub, maxRRegex, maxRReplicationFactor)
-	heaFmtD := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5s  %%-6s  %%-6s\n", maxDPrefix, maxDSub, maxDRegex, maxDAddr, maxDSpoolDir)
-	rowFmtD := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5t  %%-6t  %%-6t\n", maxDPrefix, maxDSub, maxDRegex, maxDAddr, maxDSpoolDir)
+	heaFmtD := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5s  %%-%ds  %%-6s  %%-6s\n", maxDPrefix, maxDSub, maxDRegex, maxDAddr, maxDSpoolDir, maxDMemorySpoolSize)
+	rowFmtD := fmt.Sprintf("%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-5t  %%-%ds  %%-6t  %%-6t\n", maxDPrefix, maxDSub, maxDRegex, maxDAddr, maxDSpoolDir, maxDMemorySpoolSize)
 
 	underscore := func(amount int) string {
 		return strings.Repeat("=", amount) + "\n"
@@ -455,7 +456,7 @@ func (table *Table) Print() (str string) {
 
 	str += "\n## Routes:\n"
 	cols = fmt.Sprintf(heaFmtR, "type", "key", "prefix", "substr", "regex", "replicationFactor")
-	rcols := fmt.Sprintf(heaFmtD, "prefix", "substr", "regex", "addr", "spoolDir", "spool", "pickle", "online")
+	rcols := fmt.Sprintf(heaFmtD, "prefix", "substr", "regex", "addr", "spoolDir", "spool", "memoryspoolsize", "pickle", "online")
 	indent := "  "
 	str += cols + underscore(max(len(cols), len(rcols)+len(indent))-1)
 	divider := indent + strings.Repeat("-", max(len(cols)-len(indent), len(rcols))-1) + "\n"
@@ -479,7 +480,7 @@ func (table *Table) Print() (str string) {
 		str += indent + rcols + divider
 		for _, dest := range r.Dests {
 			m := dest.Matcher
-			str += indent + fmt.Sprintf(rowFmtD, m.Prefix, m.Sub, m.Regex, dest.Addr, dest.SpoolDir, dest.Spool, dest.Pickle, dest.Online)
+			str += indent + fmt.Sprintf(rowFmtD, m.Prefix, m.Sub, m.Regex, dest.Addr, dest.SpoolDir, dest.Spool, strconv.Itoa(dest.MemorySpoolSize), dest.Pickle, dest.Online)
 		}
 		str += "\n"
 	}
