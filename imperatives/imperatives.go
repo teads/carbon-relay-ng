@@ -74,6 +74,7 @@ const (
 	optPubSubFormat
 	optPubSubCodec
 	optPubSubFlushMaxSize
+	optReplicationFactor
 )
 
 // we should make sure we apply changes atomatically. e.g. when changing dest between address A and pickle=false and B with pickle=true,
@@ -126,6 +127,7 @@ var tokens = []toki.Def{
 	{Token: optPubSubFormat, Pattern: "format="},
 	{Token: optPubSubCodec, Pattern: "codec="},
 	{Token: optPubSubFlushMaxSize, Pattern: "flushMaxSize="},
+	{Token: optReplicationFactor, Pattern: "replicationFactor="},
 	{Token: str, Pattern: "\".*\""},
 	{Token: sep, Pattern: "##"},
 	{Token: avgFn, Pattern: "avg "},
@@ -378,7 +380,7 @@ func readAddRouteConsistentHashing(s *toki.Scanner, table Table) error {
 	}
 	key := string(t.Value)
 
-	prefix, sub, regex, err := readRouteOpts(s)
+	prefix, sub, regex, replicationFactor, err := readConsistentHashingRouteOpts(s)
 	if err != nil {
 		return err
 	}
@@ -387,11 +389,16 @@ func readAddRouteConsistentHashing(s *toki.Scanner, table Table) error {
 	if err != nil {
 		return err
 	}
-	if len(destinations) < 2 {
-		return fmt.Errorf("must get at least 2 destination for route '%s'", key)
+
+	if replicationFactor <= 0 {
+		return fmt.Errorf("replicationFactor must be at least 1 '%s'", key)
 	}
 
-	route, err := route.NewConsistentHashing(key, prefix, sub, regex, destinations)
+	if replicationFactor > len(destinations) {
+		return fmt.Errorf("replicationFactor MUST be at most the number of destinations '%s'", key)
+	}
+
+	route, err := route.NewConsistentHashing(key, prefix, sub, regex, replicationFactor, destinations)
 	if err != nil {
 		return err
 	}
@@ -1129,6 +1136,47 @@ func readRouteOpts(s *toki.Scanner) (prefix, sub, regex string, err error) {
 			return
 		default:
 			return "", "", "", fmt.Errorf("unrecognized option '%s'", t.Value)
+		}
+	}
+}
+
+func readConsistentHashingRouteOpts(s *toki.Scanner) (prefix, sub, regex string, replicationFactor int, err error) {
+	replicationFactor = 1
+	for {
+		t := s.Next()
+		switch t.Token {
+		case toki.EOF:
+			return
+		case toki.Error:
+			return "", "", "", replicationFactor, errors.New("read the error token instead of one i recognize")
+		case optPrefix:
+			if t = s.Next(); t.Token != word {
+				return "", "", "", replicationFactor, errors.New("bad prefix option")
+			}
+			prefix = string(t.Value)
+		case optSub:
+			if t = s.Next(); t.Token != word {
+				return "", "", "", replicationFactor, errors.New("bad sub option")
+			}
+			sub = string(t.Value)
+		case optRegex:
+			if t = s.Next(); t.Token != word {
+				return "", "", "", replicationFactor, errors.New("bad regex option")
+			}
+			regex = string(t.Value)
+		case optReplicationFactor:
+			if t = s.Next(); t.Token != num {
+				return "", "", "", replicationFactor, errors.New("bad replicationFactor option: not a number")
+			}
+			rf, err := strconv.Atoi(strings.TrimSpace(string(t.Value)))
+			if err != nil {
+				return "", "", "", replicationFactor, errors.New(err.Error() + ",bad replicationFactor option: bad number")
+			}
+			replicationFactor = rf
+		case sep:
+			return
+		default:
+			return "", "", "", replicationFactor, fmt.Errorf("unrecognized option '%s'", t.Value)
 		}
 	}
 }

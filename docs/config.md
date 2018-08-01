@@ -75,6 +75,7 @@ type           |     Y     | sendAllMatch/sendFirstMatch/consistentHashing | N/A
 prefix         |     N     | string                                        | ""      |
 sub            |     N     | string                                        | ""      |
 regex          |     N     | string                                        | ""      |
+replicationFactor  |     N     | int                                           | 1       | only for consistentHashing, defines the total number of destinations a matching point will be written to. It must be `0 < replicationFactor < number of destinations`
 
 ### Examples
 
@@ -107,6 +108,20 @@ regex = '(Err/s|wait_time|logger)'
 destinations = [
   'graphite.prod:2003 prefix=prod. spool=true pickle=true',
   'graphite.staging:2003 prefix=staging. spool=true pickle=true'
+]
+
+[[route]]
+# a carbon route that sends to multiple carbon-cache servers
+key = 'carbon-default'
+type = 'consistentHashing'
+prefix = 'consistentHashing'
+# substr = ''
+# regex = ''
+ replicationFactor = 2
+ destinations = [
+  'carbon-cache1:2003 spool=true pickle=false',
+  'carbon-cache2:2003 spool=true pickle=false',
+  'carbon-cache3:2003 spool=true pickle=false'
 ]
 ```
 

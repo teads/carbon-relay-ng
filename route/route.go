@@ -28,9 +28,10 @@ func (c baseConfig) Dests() []*dest.Destination {
 	return c.dests
 }
 
-type consistentHashingConfig struct {
+type ConsistentHashingConfig struct {
 	baseConfig
-	Hasher *ConsistentHasher
+	Hasher            *ConsistentHasher
+	ReplicationFactor int
 }
 
 type Route interface {
@@ -52,6 +53,7 @@ type Snapshot struct {
 	Type    string              `json:"type"`
 	Key     string              `json:"key"`
 	Addr    string              `json:"addr,omitempty"`
+	Config  Config
 }
 
 type baseRoute struct {
@@ -99,15 +101,17 @@ func NewSendFirstMatch(key, prefix, sub, regex string, destinations []*dest.Dest
 	return r, nil
 }
 
-func NewConsistentHashing(key, prefix, sub, regex string, destinations []*dest.Destination) (Route, error) {
+func NewConsistentHashing(key, prefix, sub, regex string, replicationFactor int, destinations []*dest.Destination) (Route, error) {
 	m, err := matcher.New(prefix, sub, regex)
 	if err != nil {
 		return nil, err
 	}
 	r := &ConsistentHashing{baseRoute{sync.Mutex{}, atomic.Value{}, key}}
 	hasher := NewConsistentHasher(destinations)
-	r.config.Store(consistentHashingConfig{baseConfig{*m, destinations},
-		&hasher})
+	r.config.Store(ConsistentHashingConfig{baseConfig{*m, destinations},
+		&hasher,
+		replicationFactor,
+	})
 	r.run()
 	return r, nil
 }
@@ -145,13 +149,17 @@ func (route *SendFirstMatch) Dispatch(buf []byte) {
 }
 
 func (route *ConsistentHashing) Dispatch(buf []byte) {
-	conf := route.config.Load().(consistentHashingConfig)
+	conf := route.config.Load().(ConsistentHashingConfig)
 	if pos := bytes.IndexByte(buf, ' '); pos > 0 {
 		name := buf[0:pos]
-		dest := conf.Dests()[conf.Hasher.GetDestinationIndex(name)]
-		// dest should handle this as quickly as it can
-		log.Info("route %s sending to dest %s: %s", route.key, dest.Key, name)
-		dest.In <- buf
+		destStartIndex := conf.Hasher.GetDestinationIndex(name)
+		for i := 0; i < conf.ReplicationFactor; i++ {
+			destIndex := (destStartIndex + i) % len(conf.Dests())
+			dest := conf.Dests()[destIndex]
+			// dest should handle this as quickly as it can
+			log.Info("route %s sending to dest %s: %s", route.key, dest.Key, name)
+			dest.In <- buf
+		}
 	} else {
 		log.Error("could not parse %s\n", buf)
 	}
@@ -207,7 +215,7 @@ func makeSnapshot(route *baseRoute, routeType string) Snapshot {
 	for i, d := range conf.Dests() {
 		dests[i] = d.Snapshot()
 	}
-	return Snapshot{Matcher: *conf.Matcher(), Dests: dests, Type: routeType, Key: route.key}
+	return Snapshot{Matcher: *conf.Matcher(), Dests: dests, Type: routeType, Key: route.key, Config: conf}
 }
 
 func (route *SendAllMatch) Snapshot() Snapshot {
@@ -222,7 +230,7 @@ func (route *ConsistentHashing) Snapshot() Snapshot {
 	return makeSnapshot(&route.baseRoute, "consistentHashing")
 }
 
-// baseCfgExtender is a function that takes a baseConfig and returns
+// cfgExtender is a function that takes a Config and returns
 // a configuration object that implements Config. This function may be
 // the identity function, i.e., it may simply return its argument.
 // This mechanism supports maintaining different configuration objects for
@@ -244,20 +252,26 @@ func (route *ConsistentHashing) Snapshot() Snapshot {
 // baseConfig and either returns it unchanged or creates an outer
 // configuration object with the baseConfig embedded in it.
 // The private method then stores the Config object returned by the callback.
-type baseCfgExtender func(baseConfig) Config
+type cfgExtender func(Config) Config
 
-func baseConfigExtender(baseConfig baseConfig) Config {
-	return baseConfig
+func baseConfigExtender(config Config) Config {
+	return config
 }
 
-func consistentHashingConfigExtender(baseConfig baseConfig) Config {
-	hasher := NewConsistentHasher(baseConfig.Dests())
-	return consistentHashingConfig{baseConfig, &hasher}
+func consistentHashingConfigExtender(config Config) Config {
+	oldConfig := config.(ConsistentHashingConfig)
+
+	newConfig := ConsistentHashingConfig{}
+	newConfig.baseConfig = oldConfig.baseConfig
+	hasher := NewConsistentHasher(oldConfig.baseConfig.Dests())
+	newConfig.Hasher = &hasher
+	newConfig.ReplicationFactor = oldConfig.ReplicationFactor
+	return newConfig
 }
 
 // Add adds a new Destination to the Route and automatically runs it for you.
 // The destination must not be running already!
-func (route *baseRoute) addDestination(dest *dest.Destination, extendConfig baseCfgExtender) {
+func (route *baseRoute) addDestination(dest *dest.Destination, extendConfig cfgExtender) {
 	route.Lock()
 	defer route.Unlock()
 	conf := route.config.Load().(Config)
@@ -275,7 +289,7 @@ func (route *ConsistentHashing) Add(dest *dest.Destination) {
 	route.addDestination(dest, consistentHashingConfigExtender)
 }
 
-func (route *baseRoute) delDestination(index int, extendConfig baseCfgExtender) error {
+func (route *baseRoute) delDestination(index int, extendConfig cfgExtender) error {
 	route.Lock()
 	defer route.Unlock()
 	conf := route.config.Load().(Config)
@@ -294,6 +308,11 @@ func (route *baseRoute) DelDestination(index int) error {
 }
 
 func (route *ConsistentHashing) DelDestination(index int) error {
+	conf := route.config.Load().(ConsistentHashingConfig)
+	if len(conf.dests)-1 < conf.ReplicationFactor {
+		return fmt.Errorf("Cannot remove the destination because replicationFactor would be higher than the number of remaining destinations")
+	}
+
 	return route.delDestination(index, consistentHashingConfigExtender)
 }
 
@@ -307,7 +326,7 @@ func (route *baseRoute) GetDestination(index int) (*dest.Destination, error) {
 	return conf.Dests()[index], nil
 }
 
-func (route *baseRoute) update(opts map[string]string, extendConfig baseCfgExtender) error {
+func (route *baseRoute) update(opts map[string]string, extendConfig cfgExtender) error {
 	route.Lock()
 	defer route.Unlock()
 	conf := route.config.Load().(Config)
@@ -351,7 +370,7 @@ func (route *ConsistentHashing) Update(opts map[string]string) error {
 	return route.update(opts, consistentHashingConfigExtender)
 }
 
-func (route *baseRoute) updateDestination(index int, opts map[string]string, extendConfig baseCfgExtender) error {
+func (route *baseRoute) updateDestination(index int, opts map[string]string, extendConfig cfgExtender) error {
 	route.Lock()
 	defer route.Unlock()
 	conf := route.config.Load().(Config)
@@ -375,7 +394,7 @@ func (route *ConsistentHashing) UpdateDestination(index int, opts map[string]str
 	return route.updateDestination(index, opts, consistentHashingConfigExtender)
 }
 
-func (route *baseRoute) updateMatcher(matcher matcher.Matcher, extendConfig baseCfgExtender) {
+func (route *baseRoute) updateMatcher(matcher matcher.Matcher, extendConfig cfgExtender) {
 	route.Lock()
 	defer route.Unlock()
 	conf := route.config.Load().(Config)
