@@ -173,6 +173,7 @@ func parseRouteRequest(r *http.Request) (route.Route, *handlerError) {
 		spoolSyncPeriod      int
 		SpoolSleep           int
 		UnspoolSleep         int
+		QueueSize            int
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return nil, &handlerError{err, "Couldn't parse json", http.StatusBadRequest}
@@ -196,6 +197,7 @@ func parseRouteRequest(r *http.Request) (route.Route, *handlerError) {
 		time.Duration(req.spoolSyncPeriod)*time.Millisecond,
 		time.Duration(req.SpoolSleep)*time.Microsecond,
 		time.Duration(req.UnspoolSleep)*time.Microsecond,
+		req.QueueSize,
 	)
 	if err != nil {
 		return nil, &handlerError{err, "unable to create destination", http.StatusBadRequest}

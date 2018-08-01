@@ -52,7 +52,9 @@ type Destination struct {
 	RouteName            string
 
 	// set in/via Run()
-	In                  chan []byte        `json:"-"` // incoming metrics
+	In                  chan []byte `json:"-"` // incoming metrics
+	MemorySpoolSize     int
+	memorySpool         chan []byte
 	shutdown            chan bool          // signals shutdown internally
 	spool               *Spool             // queue used if spooling enabled
 	connUpdates         chan *Conn         // when the dest changes (possibly nil)
@@ -62,13 +64,14 @@ type Destination struct {
 	flushErr            chan error
 	tasks               sync.WaitGroup
 
-	numDropNoConnNoSpool metrics.Counter
-	numDropSlowSpool     metrics.Counter
-	numDropSlowConn      metrics.Counter
+	numDropNoConnMemorySpoolFull metrics.Counter
+	numDropNoConnNoSpool         metrics.Counter
+	numDropSlowSpool             metrics.Counter
+	numDropSlowConn              metrics.Counter
 }
 
 // New creates a destination object. Note that it still needs to be told to run via Run().
-func New(routeName, prefix, sub, regex, addr, spoolDir string, spool, pickle bool, periodFlush, periodReConn time.Duration, connBufSize, ioBufSize, spoolBufSize int, spoolMaxBytesPerFile, spoolSyncEvery int64, spoolSyncPeriod, spoolSleep, unspoolSleep time.Duration) (*Destination, error) {
+func New(routeName, prefix, sub, regex, addr, spoolDir string, spool, pickle bool, periodFlush, periodReConn time.Duration, connBufSize, ioBufSize, spoolBufSize int, spoolMaxBytesPerFile, spoolSyncEvery int64, spoolSyncPeriod, spoolSleep, unspoolSleep time.Duration, memorySpoolSize int) (*Destination, error) {
 	m, err := matcher.New(prefix, sub, regex)
 	if err != nil {
 		return nil, err
@@ -94,6 +97,7 @@ func New(routeName, prefix, sub, regex, addr, spoolDir string, spool, pickle boo
 		SpoolSleep:           spoolSleep,
 		UnspoolSleep:         unspoolSleep,
 		RouteName:            routeName,
+		MemorySpoolSize:      memorySpoolSize,
 	}
 	dest.setMetrics()
 	return dest, nil
@@ -103,6 +107,7 @@ func (dest *Destination) setMetrics() {
 	dest.numDropNoConnNoSpool = stats.Counter("dest=" + dest.Key + ".unit=Metric.action=drop.reason=conn_down_no_spool")
 	dest.numDropSlowSpool = stats.Counter("dest=" + dest.Key + ".unit=Metric.action=drop.reason=slow_spool")
 	dest.numDropSlowConn = stats.Counter("dest=" + dest.Key + ".unit=Metric.action=drop.reason=slow_conn")
+	dest.numDropNoConnMemorySpoolFull = stats.Counter("dest=" + dest.Key + ".unit=Metric.action=drop.reason=conn_down_memory_spool_full")
 }
 
 func (dest *Destination) Match(s []byte) bool {
@@ -165,13 +170,14 @@ func (dest *Destination) GetMatcher() matcher.Matcher {
 // a "basic" static copy of the dest, not actually running
 func (dest *Destination) Snapshot() *Destination {
 	return &Destination{
-		Matcher:  dest.GetMatcher(),
-		Addr:     dest.Addr,
-		SpoolDir: dest.SpoolDir,
-		Spool:    dest.Spool,
-		Pickle:   dest.Pickle,
-		Online:   dest.Online,
-		Key:      dest.Key,
+		Matcher:         dest.GetMatcher(),
+		Addr:            dest.Addr,
+		SpoolDir:        dest.SpoolDir,
+		Spool:           dest.Spool,
+		Pickle:          dest.Pickle,
+		Online:          dest.Online,
+		Key:             dest.Key,
+		MemorySpoolSize: dest.MemorySpoolSize,
 	}
 }
 
@@ -180,6 +186,7 @@ func (dest *Destination) Run() {
 		panic(fmt.Sprintf("Run() called on already running dest '%s'", dest.Key))
 	}
 	dest.In = make(chan []byte)
+	dest.memorySpool = make(chan []byte, dest.MemorySpoolSize)
 	dest.shutdown = make(chan bool)
 	dest.connUpdates = make(chan *Conn)
 	dest.inConnUpdate = make(chan bool)
@@ -257,6 +264,7 @@ func (dest *Destination) WaitOnline() chan struct{} {
 func (dest *Destination) relay() {
 	ticker := time.NewTicker(dest.periodReConn)
 	var toUnspool chan []byte
+	var toUnspoolFromMemory chan []byte
 	var conn *Conn
 
 	// try to send the data on the buffered tcp conn
@@ -291,6 +299,7 @@ func (dest *Destination) relay() {
 	numConnUpdates := 0
 	go dest.updateConn(dest.Addr)
 	var signalConnOnline chan struct{}
+	var lastMemDrop *time.Time
 
 	// this loop/select should never block, we can't hang dest.In or the route & table locks up
 	for {
@@ -308,6 +317,14 @@ func (dest *Destination) relay() {
 		} else {
 			toUnspool = nil
 		}
+
+		// only process memory spool queue if we have an outbound connection and we haven't needed to drop packets in a while
+		if conn != nil && !dest.SlowLastLoop && !dest.SlowNow {
+			toUnspoolFromMemory = dest.memorySpool
+		} else {
+			toUnspoolFromMemory = nil
+		}
+
 		log.Debug("dest %v entering select. conn: %v spooling: %v slowLastloop: %v, slowNow: %v spoolQueue: %v", dest.Key, conn != nil, dest.Spool, dest.SlowLastLoop, dest.SlowNow, toUnspool != nil)
 		select {
 		case sig := <-dest.setSignalConnOnline:
@@ -356,6 +373,10 @@ func (dest *Destination) relay() {
 			// we know that conn != nil here because toUnspool is set above
 			log.Info("dest %v %s received from spool -> nonBlockingSend\n", dest.Key, buf)
 			nonBlockingSend(buf)
+		// we have data in memory spool
+		case buf := <-toUnspoolFromMemory:
+			log.Info("dest %v %s received from memorySpool -> nonBlockingSend\n", dest.Key, buf)
+			nonBlockingSend(buf)
 		case buf := <-dest.In:
 			if conn != nil {
 				log.Info("dest %v %s received from In -> nonBlockingSend\n", dest.Key, buf)
@@ -363,9 +384,23 @@ func (dest *Destination) relay() {
 			} else if dest.Spool {
 				log.Info("dest %v %s received from In -> nonBlockingSpool\n", dest.Key, buf)
 				nonBlockingSpool(buf)
-			} else {
-				log.Info("dest %v %s received from In -> no conn no spool -> drop\n", dest.Key, buf)
-				dest.numDropNoConnNoSpool.Inc(1)
+			} else { //con is nil
+				//if memory spool is enabled, try to use it
+				if cap(dest.memorySpool) > 0 {
+					select {
+					case dest.memorySpool <- buf:
+					default:
+						now := time.Now()
+						if lastMemDrop == nil || lastMemDrop.Add(10*time.Second).Before(now) {
+							lastMemDrop = &now
+							log.Error("dest %v %s received from In -> no conn memory spool full -> drop (next messages are silenced for 10 seconds)\n", dest.Key, buf)
+						}
+						dest.numDropNoConnMemorySpoolFull.Inc(1)
+					}
+				} else { //else just drop
+					log.Info("dest %v %s received from In -> no conn no spool -> drop\n", dest.Key, buf)
+					dest.numDropNoConnNoSpool.Inc(1)
+				}
 			}
 		}
 	}

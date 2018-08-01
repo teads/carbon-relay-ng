@@ -75,6 +75,7 @@ const (
 	optPubSubCodec
 	optPubSubFlushMaxSize
 	optReplicationFactor
+	optMemorySpoolSize
 )
 
 // we should make sure we apply changes atomatically. e.g. when changing dest between address A and pickle=false and B with pickle=true,
@@ -113,6 +114,7 @@ var tokens = []toki.Def{
 	{Token: optUnspoolSleep, Pattern: "unspoolsleep="},
 	{Token: optPickle, Pattern: "pickle="},
 	{Token: optSpool, Pattern: "spool="},
+	{Token: optMemorySpoolSize, Pattern: "memoryspoolsize="},
 	{Token: optTrue, Pattern: "true"},
 	{Token: optFalse, Pattern: "false"},
 	{Token: optBufSize, Pattern: "bufSize="},
@@ -953,6 +955,7 @@ func readDestination(s *toki.Scanner, table Table, allowMatcher bool, routeKey s
 	spoolSyncPeriod := time.Second
 	spoolSleep := time.Duration(500) * time.Microsecond
 	unspoolSleep := time.Duration(10) * time.Microsecond
+	memorySpoolSize := 0
 
 	t := s.Next()
 	if t.Token != word {
@@ -1010,6 +1013,15 @@ func readDestination(s *toki.Scanner, table Table, allowMatcher bool, routeKey s
 			if err != nil {
 				return nil, fmt.Errorf("unrecognized spool value '%s'", t)
 			}
+		case optMemorySpoolSize:
+			if t = s.Next(); t.Token != num {
+				return nil, errFmtAddRoute
+			}
+			tmp, err := strconv.Atoi(strings.TrimSpace(string(t.Value)))
+			if err != nil {
+				return nil, err
+			}
+			memorySpoolSize = tmp
 		case optConnBufSize:
 			if t = s.Next(); t.Token != num {
 				return nil, errFmtAddRoute
@@ -1092,7 +1104,7 @@ func readDestination(s *toki.Scanner, table Table, allowMatcher bool, routeKey s
 	if !allowMatcher && (prefix != "" || sub != "" || regex != "") {
 		return nil, fmt.Errorf("matching options (prefix, sub, and regex) not allowed for this route type")
 	}
-	return destination.New(routeKey, prefix, sub, regex, addr, spoolDir, spool, pickle, periodFlush, periodReConn, connBufSize, ioBufSize, spoolBufSize, spoolMaxBytesPerFile, spoolSyncEvery, spoolSyncPeriod, spoolSleep, unspoolSleep)
+	return destination.New(routeKey, prefix, sub, regex, addr, spoolDir, spool, pickle, periodFlush, periodReConn, connBufSize, ioBufSize, spoolBufSize, spoolMaxBytesPerFile, spoolSyncEvery, spoolSyncPeriod, spoolSleep, unspoolSleep, memorySpoolSize)
 }
 
 func ParseDestinations(destinationConfigs []string, table Table, allowMatcher bool, routeKey string) (destinations []*destination.Destination, err error) {
